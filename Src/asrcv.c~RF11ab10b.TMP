@@ -1,0 +1,167 @@
+#include "asrcv.h"
+#include "usart.h"
+#include "timer.h"
+#include "pins.h"
+#include <string.h>
+
+
+unsigned char tx_buf[256];
+#define ACK 0x79
+#define NACK 0x1F
+
+
+
+unsigned char WaitACK(void)
+{
+	unsigned int data=0;
+	data=USART2_GetChar();
+	if(data==ACK){return 0;}
+	if(data==NACK){return 1;}
+	if(data==0xAAAA){return 2;} //timeout error
+	return data;
+}
+
+unsigned char StartBootStm (void)
+{
+	unsigned int temp=0;
+	BOOT_SLAVE(1);
+	RESET_SLAVE(0);
+	delay_ms(100);
+	RESET_SLAVE(1);
+	//BOOT_SLAVE(0);
+	
+	delay_ms(200);
+	//check communication	
+	USART2_SendByte(0x7F);
+	temp=WaitACK();
+	if(temp){return temp;}
+	delay_ms(10);
+	return 0xAA;
+}
+
+
+unsigned char LockReadStm(void)
+{
+	unsigned int temp=0;
+	
+	//check communication	
+	USART2_SendByte(0x82);
+	USART2_SendByte(0x7D);
+	temp=WaitACK();
+	if(temp){return temp;}
+	temp=WaitACK();
+	if(temp){return temp;}
+	delay_ms(10);
+	return 0xAA;
+}
+
+unsigned char UnLockReadStm(void)
+{
+	unsigned int temp=0;
+	
+	//check communication	
+	USART2_SendByte(0x92);
+	USART2_SendByte(0x6D);
+	temp=WaitACK();
+	if(temp){return temp+40;}
+	temp=WaitACK();
+	if(temp){return temp;}
+	delay_ms(10);
+	return 0xAA;
+}
+
+
+//return 0 - erased correct
+//return 1 - incorrect command error
+//return 2 - timeout error
+//return 3 - unknown error
+unsigned char EraseStm(void)
+{
+	unsigned int temp=0;
+		
+	//erase command	
+	USART2_SendByte(0x44);
+	USART2_SendByte(0xBB);
+	temp=WaitACK();
+	if(temp){return temp+30;}
+	//global erase command 
+	USART2_SendByte(0xFF);
+	USART2_SendByte(0xFF);
+	USART2_SendByte(0x00);
+	temp=WaitACK();
+	if(temp){return temp;}
+	return 0;
+}
+
+//send adress and checksum
+void SendAdress (int adr)
+{
+	unsigned char a1=0,a2=0,a3=0,a4=0;
+	a1=adr>>24;
+	a2=adr>>16;
+	a3=adr>>8;
+	a4=adr;
+	USART2_SendByte(a1);
+	USART2_SendByte(a2);
+	USART2_SendByte(a3);
+	USART2_SendByte(a4);
+	USART2_SendByte(a1^a2^a3^a4);
+}
+
+
+unsigned char WriteStm(void)
+{
+	unsigned int temp;
+	unsigned int counter=0;
+	unsigned int part=0;
+	
+	do{
+	//write command
+	USART2_SendByte(0x31);
+	USART2_SendByte(0xCE);
+	temp=WaitACK();
+	if(temp){return temp;}
+
+	SendAdress(0x08000000+counter);
+	temp=WaitACK();
+	if(temp){return temp;}
+
+	ClearBuf();
+	part=LEN_BIN_ASRCV-counter;
+	if(part>256){part=256;}
+	
+	memcpy(&tx_buf,bin_asrcv+counter,part);
+	SendBuf();
+	temp=WaitACK();
+	if(temp){return temp;}
+	
+	counter=counter+256;
+	//EventMessageDigit("STM","writing flash",40,0x08000000+counter);
+	}
+	while(counter<LEN_BIN_ASRCV);
+
+	return 0;
+}
+
+void ClearBuf (void)
+{
+	unsigned char i=0;
+	for(i=0;i<255;i++)
+	{
+		tx_buf[i]=0xFF;
+	}
+}
+
+void SendBuf (void)
+{
+	unsigned int i=0,chsum=0xFF;
+	USART2_SendByte(0xFF);
+	for(i=0;i<256;i++)
+	{
+		USART2_SendByte (tx_buf[i]);
+		chsum=chsum^tx_buf[i];
+	}
+	USART2_SendByte((unsigned char)chsum);
+}
+
+

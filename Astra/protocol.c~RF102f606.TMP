@@ -1,0 +1,250 @@
+#include "version.h"
+#include "timer.h"
+#include "pins.h"
+#include "protocol.h"
+#include "st7735.h"
+#include <stdio.h> 
+#include <string.h>
+#include "flash.h"
+#include "usart.h"
+#include "protocol.h"
+
+#define size_dma_buf 100
+unsigned char dma_buf_rec[size_dma_buf];
+unsigned char dma_buf_send[size_dma_buf];
+
+volatile unsigned int dma_cnt=0;
+unsigned int dma_state=0;
+unsigned char mes_len[3];
+unsigned char mes_ses[3];
+unsigned char mes_command[3];
+unsigned char mes_salt[8];
+unsigned char mes_checksum[8];
+unsigned char mes_data[100];
+unsigned int  mes_data_cnt=0;
+
+
+unsigned int NextByte (void);
+
+enum
+{
+	STATUS=0,
+	VERSION,
+	SUM_REPORT,
+	CLEAR_REPORT,
+	ALLOW_NOTE,
+	CLUTZ_LED,
+	COUNTER_NOTE,
+	RESET_POWER,
+	CURRENCY
+};
+
+void ClearDmaBuffer (void)
+{
+	unsigned int i=0;
+	for(i=0;i<sizeof(dma_buf_rec);i++){dma_buf_rec[i]=0x30;}
+}
+
+
+void StartReceiveCommand (void)
+{
+	ClearDmaBuffer();
+	dma_cnt=0;
+	dma_state=0;
+	HAL_UART_DMAStop(&huart1);
+	HAL_UART_Receive_DMA(&huart1, dma_buf_rec, size_dma_buf);
+}
+
+void ReceiveCommand (void)
+{
+	char tmpBuf[50];
+	
+//	ClearLcdMemory();	
+	LCD_ShowString(10,50,dma_buf_rec);
+	sprintf(tmpBuf,"CNT %d",hdma_usart1_rx.Instance->NDTR);
+//	LCD_ShowString(10,70,tmpBuf);
+
+//	LCD_Refresh();
+	//HAL_UART_Receive_DMA(&huart1, dma_buf_rec, size_dma_buf);
+}
+
+
+void CheckCommand (void)
+{
+	if (!memcmp (mes_command, "VER",3)){SendCommand(0,VERSION);}
+}
+
+
+unsigned int CheckDMABuf (void)
+{
+	unsigned int dma_len=0,count=0;
+	char tmpBuf[50];
+
+	count=(hdma_usart1_rx.Instance->NDTR);
+	dma_len= size_dma_buf - count;
+	
+	while(dma_cnt<dma_len){
+				
+		if(NextByte())
+		{
+			CheckCommand();
+			StartReceiveCommand();
+			return 0;
+		}
+		
+	}
+	
+}
+
+
+
+unsigned int NextByte (void)
+{
+	unsigned int tmp=0;
+	unsigned int len=0;
+	char tmpBuf[50];
+	unsigned int crc=0,i=0;
+	unsigned int crc_mes=0;
+	
+	tmp=dma_buf_rec[dma_cnt++];
+	
+	if((tmp<0x20)||(tmp>0x7F)){ 
+		if(tmp==0x02){dma_state=1;}
+		//dma_cnt=0;dma_state=0;
+		return 0;
+	}
+	
+	if(dma_state==0){return 0;}
+	
+	dma_state++;
+			
+	if((dma_state>1)&&(dma_state<5)){mes_len[dma_state-2]=tmp;return 0;}	
+
+	if((dma_state>4)&&(dma_state<8)){mes_ses[dma_state-5]=tmp;return 0;}
+	
+	if((dma_state>7)&&(dma_state<11)){mes_command[dma_state-8]=tmp;return 0;}
+	
+	len=(mes_len[0]-0x30)*100+(mes_len[1]-0x30)*10+(mes_len[2]-0x30); 
+	
+	//dma_state 11
+		
+	if(dma_state<len+2){
+		mes_data[dma_state-11]=tmp;
+		mes_data_cnt++;
+		return 0;
+	}
+
+	mes_salt[dma_state-len-2]=tmp;
+	
+	if(dma_state<=len+8){return 0;}
+	
+	mes_checksum[dma_state-len-2]=tmp;
+	
+	if(dma_state<=len+16){return 0;}
+	
+	//Show packet
+	ClearLcdMemory();
+	LCD_ShowString(10,0,"len: ");LCD_ShowStringSize(40,0,mes_len,3);	
+	LCD_ShowString(10,15,"ses: ");LCD_ShowStringSize(40,15,mes_ses,3);
+	LCD_ShowString(10,30,"com: ");LCD_ShowStringSize(40,30,mes_command,3);
+	LCD_ShowString(10,45,"date: ");LCD_ShowStringSize(40,45,mes_data,mes_data_cnt);
+	LCD_ShowString(10,60,"salt: ");LCD_ShowStringSize(40,60,mes_salt,8);
+	LCD_ShowString(10,75,"crc: ");LCD_ShowStringSize(40,75,mes_checksum,8);
+	
+	for(i=1;i<len+9;i++){crc=crc+dma_buf_rec[i];}
+	
+	for(i=0;i<8;i++)
+	{
+		if(mes_checksum[i]>'9'){mes_checksum[i]=mes_checksum[i]-0x37;}
+		else{mes_checksum[i]=mes_checksum[i]-0x30;}
+	}
+	crc_mes=(mes_checksum[0]<<28)+(mes_checksum[1]<<24)+(mes_checksum[2]<<20)+(mes_checksum[3]<<16)+
+	(mes_checksum[4]<<12)+(mes_checksum[5]<<8) +(mes_checksum[6]<<4)+mes_checksum[7];
+	
+	if(crc==crc_mes){sprintf(tmpBuf,"crc validation: ok");}
+	else{sprintf(tmpBuf,"crc %X =! %X",crc,crc_mes);}   // сделать выход и стирание если не сошлись контр суммы
+	LCD_ShowString(10,90,tmpBuf);
+	LCD_Refresh();	
+	
+	return 1;
+	
+}
+
+
+
+
+
+void SendCommand (unsigned int session,unsigned int command)
+{
+	  unsigned int len=4,i=0,y=0;
+    unsigned int crc=0;
+    unsigned char checksum[8];
+	//write STX
+    dma_buf_send[0]=0x03;
+    //write Number of session
+    dma_buf_send[4]=(session/100+0x30);
+    dma_buf_send[5]=((session%100)/10)+0x30;
+    dma_buf_send[6]=((session%100)%10)+0x30;
+
+    //write command
+    switch(command)
+    {
+        case STATUS:
+            memcpy(&dma_buf_send[7],"STA",3);
+            len=len+6;
+            break;
+        case VERSION:
+            memcpy(&dma_buf_send[7],"VER",3);
+            len=len+6;
+            break;
+        case SUM_REPORT:
+            memcpy(&dma_buf_send[7],"SUM",3);
+            len=len+6;
+            break;
+        case CLEAR_REPORT:
+            memcpy(&dma_buf_send[7],"CLR",3);
+            len=len+6;
+            break;
+        case ALLOW_NOTE:
+            memcpy(&dma_buf_send[7],"ALL",3);
+            len=len+6;
+            break;
+        case CLUTZ_LED:
+            memcpy(&dma_buf_send[7],"CLU",3);
+            len=len+6;
+            break;
+        case COUNTER_NOTE:
+            memcpy(&dma_buf_send[7],"CNT",3);
+            len=len+6;
+            break;
+        case RESET_POWER:
+            memcpy(&dma_buf_send[7],"RST",3);
+            len=len+6;
+            break;
+        case CURRENCY:
+            memcpy(&dma_buf_send[7],"CUR",3);
+            len=len+6;
+            break;
+        default:
+            break;
+    }
+    //write salt
+    memcpy(&dma_buf_send[len],"11111111",8);
+    //write len
+    dma_buf_send[1]=((len-1)/100+0x30);
+    dma_buf_send[2]=(((len-1)%100)/10)+0x30;
+    dma_buf_send[3]=(((len-1)%100)%10)+0x30;
+    //write crc
+    for(i=1;i<len+8;i++){crc=crc+dma_buf_send[i];}
+
+    for(i=0;i<8;i++)
+    {
+        checksum[i]=(crc>>(28-y))&0x0F;
+        if(checksum[i]>9){checksum[i]=checksum[i]+0x37;}
+        else{checksum[i]=checksum[i]+0x30;}
+        y=y+4;
+    }
+    memcpy(&dma_buf_send[len+8],checksum,8);
+	
+		HAL_UART_Transmit_DMA(&huart1,dma_buf_send, len+16);
+}
